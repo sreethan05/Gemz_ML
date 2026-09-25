@@ -41,18 +41,27 @@ def _record_keys(rec: Record, df_counts: dict[str, int], cfg: Config) -> list[tu
     for num in rec.numbers:
         keys.append(("n", num))
 
-    # 3. sorted-token signature + country
+    # 3. postal / PIN code keys (country-scoped: 5-digit US/France, 6-digit India)
+    for pin in rec.pins:
+        keys.append(("pin", rec.country, pin))
+
+    # 4. sorted-token signature + country
     sig = " ".join(sorted(rec.core_tokens)[: cfg.sig_tokens])
     if sig:
         keys.append(("s", rec.country, sig))
 
-    # 4. name prefix + country
+    # 5. name prefix + country
     if rec.name_prefix:
         keys.append(("p", rec.country, rec.name_prefix))
 
-    # 5. metaphone of the most distinctive (longest) core token + country
+    # 6. metaphone of the most distinctive (longest) core token + country
     if rec.metaphone:
         keys.append(("m", rec.country, rec.metaphone))
+
+    # 7. distinctive address tokens + country
+    for atok in rec.addr_tokens:
+        if len(atok) >= 5 and not atok.isdigit():
+            keys.append(("a", rec.country, atok))
 
     return keys
 

@@ -37,7 +37,7 @@ class Config:
     learning_rate: float = 0.05
     num_leaves: int = 63
     # --- matching ---
-    threshold: float = 0.65        # pair acceptance threshold
+    threshold: float = 0.55        # pair acceptance threshold
     min_top: float = 0.70          # entity-level: if best candidate score is below
                                    # this, predict singleton (protects F_0.5)
     # --- training ---

@@ -21,17 +21,32 @@ from .common import Record
 
 # legal / corporate suffixes and filler words stripped from "core" name tokens
 LEGAL_TOKENS = {
+    # US & International
     "corp", "corporation", "inc", "incorporated", "llc", "llp", "ltd", "limited",
-    "pvt", "private", "plc", "co", "company", "cos", "and", "the", "of", "for",
-    "enterprises", "enterprise", "traders", "trading", "group", "solutions",
-    "services", "internationl", "international", "intl", "india", "usa", "us",
+    "co", "company", "cos", "plc", "holdings", "group", "enterprises",
+    "enterprise", "services", "solutions", "technologies", "tech",
+    "international", "internationl", "intl", "consulting", "associates",
+    "trading", "traders", "industries", "agency", "agencies", "stores", "store",
+    "and", "the", "of", "for", "usa", "us",
+    # India
+    "pvt", "private", "sons", "india",
+    # France
+    "sarl", "sas", "sasu", "eurl", "sa", "sci", "snc", "scop", "gie",
+    "societe", "ets", "etablissements", "cie", "france", "fr",
 }
 
 # common words that carry no address signal
 ADDR_STOP = {
-    "near", "opp", "opposite", "behind", "next", "to", "the", "and", "at",
-    "no", "room", "floor", "flr", "dist", "district", "tehsil", "taluk",
-    "road", "street", "lane", "block", "building", "area", "nagar", "colony",
+    "near", "opp", "opposite", "behind", "beside", "adj", "adjacent", "next",
+    "to", "the", "and", "at", "post", "po", "no", "room", "floor", "flr",
+    "dist", "district", "taluk", "tehsil", "road", "rd", "street", "st",
+    "lane", "ln", "avenue", "ave", "highway", "cross", "main", "phase",
+    "sector", "sec", "block", "building", "bldg", "house", "flat", "flt",
+    "shop", "gala", "complex", "area", "nagar", "colony", "enclave",
+    "vihar", "layout", "city", "state", "pin", "code", "zip",
+    "india", "us", "usa", "france",
+    # France address stops
+    "rue", "chemin", "quai", "allee", "route", "cedex", "bp",
 }
 
 # address abbreviations expanded to a canonical form (bidirectional noise -> one form)
@@ -47,6 +62,7 @@ ADDR_ABBREV = {
     "xing": "crossing", "chowk": "chowk", "br": "branch",
     # french-flavoured variants fold onto the same canonical words
     "rue": "street", "avenu": "avenue", "chem": "chemin", "quai": "quay",
+    "all": "allee", "rte": "route", "imp": "impasse",
 }
 
 # keep unicode letters/digits and whitespace, strip punctuation/symbols:
