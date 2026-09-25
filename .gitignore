@@ -1,0 +1,22 @@
+# Datasets (large files > 100MB prohibited by GitHub)
+dataset/
+output/
+
+# Python cache & artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+
+# Environment & scratch
+.venv/
+env/
+venv/
+scratch/
+.system_generated/
+6ab10eb3b23ba_student_resource/
+business_entity_resolution_project/
+
+# OS files
+.DS_Store
+Thumbs.db
