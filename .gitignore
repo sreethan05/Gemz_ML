@@ -1,7 +1,7 @@
 # Datasets (large files > 100MB prohibited by GitHub)
 dataset/
 output/*.tsv
-output/submission_0.627/
+output/submission_*/
 output/france_*.tsv
 
 # Python cache & artifacts
