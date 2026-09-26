@@ -428,7 +428,7 @@ def main():
                             a_sort = feats[11]
                             if pin_conflict > 0.5 and a_sort < 0.90:
                                 e_probs[idx_p] = 0.0
-                            elif ctry == "india" and a_sort >= 0.90 and (feats[20] > 0.5 or feats[17] >= 0.5):
+                            elif a_sort >= 0.90 and (feats[20] > 0.5 or feats[17] >= 0.5):
                                 if e_probs[idx_p] < threshold:
                                     e_probs[idx_p] = max(e_probs[idx_p], threshold)
 
