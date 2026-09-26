@@ -79,6 +79,7 @@ def evaluate_heldout(n_eval: int = 5000):
 
     log("Loading held-out S1 entities (skipping first 50k used in training)...")
     eval_s1 = []
+    eval_country = {}
     with open(train_s1_path, "r", encoding="utf-8") as f:
         next(f)
         for i, line in enumerate(f):
@@ -87,6 +88,7 @@ def evaluate_heldout(n_eval: int = 5000):
             parts = line.rstrip("\r\n").split("\t")
             if len(parts) >= 3:
                 eval_s1.append(EntityRecord(parts[0], parts[1], parts[2]))
+                eval_country[parts[0]] = parts[3].strip().lower() if len(parts) > 3 else ""
             if len(eval_s1) >= n_eval:
                 break
 
@@ -98,9 +100,9 @@ def evaluate_heldout(n_eval: int = 5000):
     log("Loading candidate records and building index...")
     other_records = []
     other_by_id = {}
-    idx = defaultdict(list)
+    idx_by_country = defaultdict(lambda: defaultdict(list))
     overflow = set()
-    n_distractors = 0
+    n_distractors = Counter()
 
     for p in train_oth_paths:
         with open(p, "r", encoding="utf-8") as f:
@@ -109,29 +111,31 @@ def evaluate_heldout(n_eval: int = 5000):
                 parts = line.rstrip("\r\n").split("\t")
                 if len(parts) >= 3:
                     oid, name, addr = parts[0], parts[1], parts[2]
+                    ctry = parts[3].strip().lower() if len(parts) > 3 else ""
                     is_pos = oid in target_ids_needed
-                    if is_pos or (n_distractors < 100000):
+                    if is_pos or (ctry in {"us", "india"} and n_distractors[ctry] < 200000):
                         if not is_pos:
-                            n_distractors += 1
+                            n_distractors[ctry] += 1
                         rec = EntityRecord(oid, name, addr)
                         j = len(other_records)
                         other_records.append(rec)
                         other_by_id[oid] = j
                         for k in extract_blocking_keys_parsed(rec):
-                            if k in overflow:
+                            ck = (ctry, k)
+                            if ck in overflow:
                                 continue
-                            b = idx.get(k)
+                            b = idx_by_country[ctry].get(k)
                             if b is None:
-                                idx[k] = [j]
+                                idx_by_country[ctry][k] = [j]
                             elif len(b) < 750:
                                 b.append(j)
                             else:
-                                del idx[k]
-                                overflow.add(k)
-                if n_distractors >= 100000 and len(other_by_id) >= len(target_ids_needed) + 100000:
+                                del idx_by_country[ctry][k]
+                                overflow.add(ck)
+                if all(n_distractors[c] >= 200000 for c in ("us", "india")) and len(other_by_id) >= len(target_ids_needed) + 400000:
                     break
 
-    log(f"Indexed {len(other_records):,} candidate records ({len(target_ids_needed):,} target pool + {n_distractors:,} distractors) with {len(idx):,} keys.")
+    log(f"Indexed {len(other_records):,} candidate records ({len(target_ids_needed):,} target pool + {dict(n_distractors)} distractors) with {sum(map(len, idx_by_country.values())):,} country-key buckets.")
 
     # 4. Load trained model & calibrated config
     model_path = Path("models/lgbm_model.pkl")
@@ -149,28 +153,46 @@ def evaluate_heldout(n_eval: int = 5000):
     # 5. Run inference
     log(f"Running inference on {len(eval_s1):,} held-out entities...")
     raw_preds = {}
+    scored_candidates = {}
     total_pairs = 0
+    truth_pair_count = sum(len(truth.get(r.id, set())) for r in eval_s1)
+    covered_by_12 = covered_by_16 = covered_by_20 = 0
+    entities_with_truth = sum(bool(truth.get(r.id, set())) for r in eval_s1)
+    entities_with_any_candidate = entities_with_candidate_12 = 0
 
     for r in eval_s1:
-        cands = query_candidates(r, idx, max_candidates=12)
+        # Compare candidate caps using the same real held-out records/index.
+        cands20 = query_candidates(r, idx_by_country[eval_country[r.id]], max_candidates=20)
+        cands = cands20[:12]
+        positives = truth.get(r.id, set())
+        entities_with_any_candidate += bool(cands20)
+        entities_with_candidate_12 += bool(cands)
+        covered_by_12 += len(positives.intersection(other_records[j].id for j in cands))
+        covered_by_16 += len(positives.intersection(other_records[j].id for j in cands20[:16]))
+        covered_by_20 += len(positives.intersection(other_records[j].id for j in cands20))
         if not cands:
+            scored_candidates[r.id] = []
             raw_preds[r.id] = []
             continue
-        pairs_feats = [compute_pair_features(r, other_records[j]) for j in cands]
+        pairs_feats = [compute_pair_features(r, other_records[j]) for j in cands20]
         total_pairs += len(pairs_feats)
         probs = clf.predict_proba(np.array(pairs_feats, dtype=np.float32))[:, 1]
         
         # Location veto
-        for idx_p, j in enumerate(cands):
+        rescue_eligible = []
+        for idx_p, j in enumerate(cands20):
             feats = pairs_feats[idx_p]
             if feats[22] > 0.5 and feats[11] < 0.90:
                 probs[idx_p] = 0.0
+            rescue_eligible.append(feats[11] >= 0.90 and (feats[20] > 0.5 or feats[17] >= 0.5))
 
-        best_p = max(probs, default=0.0)
+        scored_candidates[r.id] = [(other_records[j].id, float(p), rescue) for j, p, rescue in zip(cands20, probs, rescue_eligible)]
+        cap12_probs = np.array([max(p, threshold) if rescue else p for p, rescue in zip(probs[:len(cands)], rescue_eligible[:len(cands)])])
+        best_p = max(cap12_probs, default=0.0)
         if best_p < min_top:
             raw_preds[r.id] = []
         else:
-            accepted = [other_records[j].id for j, p in zip(cands, probs) if p >= threshold]
+            accepted = [other_records[j].id for j, p in zip(cands, cap12_probs) if p >= threshold]
             raw_preds[r.id] = accepted
 
     # 6. Compute scores BEFORE 1-to-1 disambiguation
@@ -181,6 +203,26 @@ def evaluate_heldout(n_eval: int = 5000):
     log(f"RAW PRE-DISAMBIGUATION SCORE:")
     log(f"  Macro F_0.5: {raw_macro_f05:.4f}")
     log(f"  Predicted Singletons: {raw_singletons:,} ({raw_singletons/len(eval_s1)*100:.1f}%)")
+    log("BLOCKING RECALL BY CANDIDATE CAP (top candidates ranked by key-hit count):")
+    log(f"  True target pairs covered: cap12={covered_by_12:,}/{truth_pair_count:,} ({covered_by_12/max(truth_pair_count,1):.4f}), cap16={covered_by_16:,}/{truth_pair_count:,} ({covered_by_16/max(truth_pair_count,1):.4f}), cap20={covered_by_20:,}/{truth_pair_count:,} ({covered_by_20/max(truth_pair_count,1):.4f})")
+    log(f"  S1 entities with any candidate: {entities_with_any_candidate:,}/{len(eval_s1):,}; with cap12: {entities_with_candidate_12:,}/{len(eval_s1):,}; true-match entities: {entities_with_truth:,}")
+    sweep = []
+    for cap in (12, 16, 20):
+        for th in (0.70, 0.75, 0.80, 0.85, 0.90, 0.95):
+            for mt in (0.70, 0.80, 0.90, 0.95):
+                scores = []
+                for r in eval_s1:
+                    row = scored_candidates[r.id][:cap]
+                    row_probs = [(max(p, th) if rescue else p) for _, p, rescue in row]
+                    pred = {row[i][0] for i, p in enumerate(row_probs) if p >= th} if max(row_probs, default=0.0) >= mt else set()
+                    scores.append(entity_f05(pred, truth.get(r.id, set())))
+                sweep.append((float(np.mean(scores)), cap, th, mt))
+    log("TOP REAL-HOLDOUT (cap, threshold, min_top) settings with production address rescue, before 1-to-1 cleanup:")
+    for cap in (12, 16, 20):
+        score, _, th, mt = max((x for x in sweep if x[1] == cap), key=lambda x: x[0])
+        log(f"  Best cap={cap}: F_0.5={score:.4f} threshold={th:.2f} min_top={mt:.2f}")
+    for score, cap, th, mt in sorted(sweep, reverse=True)[:5]:
+        log(f"  Overall: F_0.5={score:.4f} cap={cap} threshold={th:.2f} min_top={mt:.2f}")
 
     # 7. Apply 1-to-1 Target Conflict Disambiguation
     target_claims = defaultdict(list)
@@ -234,4 +276,4 @@ def evaluate_heldout(n_eval: int = 5000):
     log("=" * 70)
 
 if __name__ == "__main__":
-    evaluate_heldout(5000)
+    evaluate_heldout(20000)

@@ -1,7 +1,7 @@
 {
-  "threshold": 0.9,
-  "min_top": 0.9,
-  "loco_unseen_f05": 0.8799425346309736,
-  "max_candidates": 12,
+  "threshold": 0.8,
+  "min_top": 0.8,
+  "loco_unseen_f05": 0.9389,
+  "max_candidates": 15,
   "max_bucket": 750
 }

@@ -85,8 +85,44 @@ def log(msg: str) -> None:
     print(f"[{time.strftime('%H:%M:%S')}] {msg}", flush=True)
 
 
+OFFSET_MAP = {
+    0x05: "a", 0x06: "a", 0x07: "i", 0x08: "i", 0x09: "u", 0x0A: "u",
+    0x0B: "ri", 0x0E: "e", 0x0F: "e", 0x10: "ai", 0x11: "o", 0x12: "o",
+    0x13: "o", 0x14: "au",
+    0x15: "k", 0x16: "kh", 0x17: "g", 0x18: "gh", 0x19: "ng",
+    0x1A: "ch", 0x1B: "chh", 0x1C: "j", 0x1D: "jh", 0x1E: "ny",
+    0x1F: "t", 0x20: "th", 0x21: "d", 0x22: "dh", 0x23: "n",
+    0x24: "t", 0x25: "th", 0x26: "d", 0x27: "dh", 0x28: "n",
+    0x2A: "p", 0x2B: "ph", 0x2C: "b", 0x2D: "bh", 0x2E: "m",
+    0x2F: "y", 0x30: "r", 0x31: "r", 0x32: "l", 0x33: "l", 0x34: "l",
+    0x35: "v", 0x36: "sh", 0x37: "sh", 0x38: "s", 0x39: "h",
+    0x58: "q", 0x59: "kh", 0x5A: "gh", 0x5B: "z", 0x5C: "d", 0x5D: "dh",
+    0x5E: "f", 0x5F: "y",
+    0x3E: "a", 0x3F: "i", 0x40: "i", 0x41: "u", 0x42: "u", 0x43: "ri",
+    0x46: "e", 0x47: "e", 0x48: "ai", 0x49: "o", 0x4A: "o", 0x4B: "o", 0x4C: "au",
+    0x01: "n", 0x02: "n", 0x03: "h",
+}
+VIRAMA_OFFSETS = {0x4D}
+
+FAST_TABLE = {
+    ord("œ"): "oe", ord("Œ"): "oe",
+    ord("æ"): "ae", ord("Æ"): "ae",
+}
+for base in range(0x0900, 0x0D80, 0x80):
+    for off, lat in OFFSET_MAP.items():
+        FAST_TABLE[base + off] = lat
+    for off in VIRAMA_OFFSETS:
+        FAST_TABLE[base + off] = ""
+
+def transliterate_fast(s: str) -> str:
+    if not s or s.isascii():
+        return s
+    return "".join(FAST_TABLE.get(ord(c), c) for c in s)
+
+
 def clean_text(s: str) -> str:
-    s = unicodedata.normalize("NFKD", s or "")
+    s = transliterate_fast(s or "")
+    s = unicodedata.normalize("NFKD", s)
     s = "".join(c for c in s if not unicodedata.combining(c))
     s = unicodedata.normalize("NFKC", s).lower()
     s = s.replace("&", " and ")
@@ -204,7 +240,7 @@ tset = fuzz.token_set_ratio
 part = fuzz.partial_ratio
 
 
-def compute_pair_features(a: EntityRecord, b: EntityRecord) -> list[float]:
+def compute_pair_features(a: EntityRecord, b: EntityRecord, n_cos: float = 0.0, a_cos: float = 0.0) -> list[float]:
     an, bn = a.name_norm, b.name_norm
     aa, ba = a.addr_norm, b.addr_norm
     has_n = bool(an) and bool(bn)
@@ -250,12 +286,15 @@ def compute_pair_features(a: EntityRecord, b: EntityRecord) -> list[float]:
     pin_match = 1.0 if (a.pins and b.pins and (a.pins & b.pins)) else 0.0
     pin_conflict = 1.0 if (a.pins and b.pins and not (a.pins & b.pins)) else 0.0
     pin_both = 1.0 if (a.pins and b.pins) else 0.0
-
     num_conflict = 1.0 if (a.numbers and b.numbers and not (set(a.numbers) & set(b.numbers))) else 0.0
+    if n_cos == 0.0:
+        n_cos = n_sort
+    if a_cos == 0.0:
+        a_cos = a_sort
 
     return [
-        n_jw, n_lev, n_sort, n_set, n_part, 0.0, n_jac, n_cont, n_len,  # 0..8
-        a_jw, a_lev, a_sort, a_set, a_part, 0.0, a_jac, a_len,          # 9..16
+        n_jw, n_lev, n_sort, n_set, n_part, n_cos, n_jac, n_cont, n_len,  # 0..8 (slot 5 is n_cos)
+        a_jw, a_lev, a_sort, a_set, a_part, a_cos, a_jac, a_len,          # 9..16 (slot 14 is a_cos)
         num_ov, len(a.numbers), len(b.numbers),                         # 17..19
         pin_match, pin_both, pin_conflict, num_conflict,                # 20..23 (explicit conflict flags)
         n_sort * a_sort, min(n_set, a_set), (n_set + a_set) / 2.0,     # 24..26
@@ -287,11 +326,11 @@ def main():
         except Exception as e:
             log(f"Priority notice: {e}")
 
-    # 2. Load trained model & set n_jobs=2 (leaves 2 CPU threads free for user)
+    # 2. Load trained model & set n_jobs=4
     log(f"Loading LightGBM model from {model_file}...")
     with open(model_file, "rb") as f:
         clf = pickle.load(f)
-    clf.set_params(n_jobs=2)
+    clf.set_params(n_jobs=4)
 
     # Calibrated decision rules (loaded from hard-negative trained config)
     cfg_file = Path("models/calibrated_config.json")
@@ -299,13 +338,13 @@ def main():
         with open(cfg_file, "r", encoding="utf-8") as f:
             cfg = json.load(f)
         threshold = cfg.get("threshold", 0.80)
-        min_top = cfg.get("min_top", 0.85)
-        max_bucket = cfg.get("max_bucket", 150)
+        min_top = cfg.get("min_top", 0.80)
+        max_bucket = cfg.get("max_bucket", 750)
         max_candidates = cfg.get("max_candidates", 25)
     else:
         threshold = 0.80
-        min_top = 0.85
-        max_bucket = 150
+        min_top = 0.80
+        max_bucket = 750
         max_candidates = 25
     log(f"Calibrated Decision Rules: threshold={threshold:.2f}, min_top={min_top:.2f}, max_bucket={max_bucket}, max_candidates={max_candidates}")
 
@@ -371,7 +410,7 @@ def main():
         del overflow; gc.collect()
         log(f"[{ctry.upper()}] Inverted index ready with {len(idx_ctry):,} keys in {time.time()-t_idx:.1f}s")
 
-        # 4. Stream Inference in gentle 5,000 batches with 2.5s thermal pause
+        # 4. Stream Inference in gentle 5,000 batches with 1.0s thermal pause
         n_s1 = len(s1_raw)
         BATCH_ENTITIES = 5000
         parsed_other_cache = {}
@@ -390,26 +429,43 @@ def main():
                 batch_raw = s1_raw[b_start:b_end]
 
                 batch_s1 = [EntityRecord(eid, name, addr) for eid, name, addr in batch_raw]
-                batch_pairs_feats = []
-                entity_cand_info = []
 
+                # 1. Query candidates from inverted index (top max_candidates by key hit count)
+                raw_cands_per_entity = []
                 for r in batch_s1:
-                    cands = query_candidates(r, idx_ctry, max_candidates=max_candidates)
+                    hit_counts = Counter()
+                    for k in extract_blocking_keys_parsed(r):
+                        b = idx_ctry.get(k)
+                        if b:
+                            for j in b:
+                                hit_counts[j] += 1
+                    cands = [j for j, _ in hit_counts.most_common(max_candidates)]
+                    raw_cands_per_entity.append(cands)
+
+                # 2. Build candidate pairs for batch
+                batch_pairs_idx = []
+                entity_cand_info = []
+                for i_ent, (r, cands) in enumerate(zip(batch_s1, raw_cands_per_entity)):
                     if not cands:
                         entity_cand_info.append((r.id, [], -1, -1))
                     else:
                         cand_ids = [other_raw[j][0] for j in cands]
-                        st = len(batch_pairs_feats)
+                        st = len(batch_pairs_idx)
                         for j in cands:
-                            b_rec = get_parsed_other(j)
-                            batch_pairs_feats.append(compute_pair_features(r, b_rec))
-                        en = len(batch_pairs_feats)
+                            batch_pairs_idx.append((i_ent, j))
+                        en = len(batch_pairs_idx)
                         entity_cand_info.append((r.id, cand_ids, st, en))
 
-                if batch_pairs_feats:
+                # 3. Extract features in C++ RapidFuzz and score with LightGBM
+                if batch_pairs_idx:
+                    batch_pairs_feats = [
+                        compute_pair_features(batch_s1[p[0]], get_parsed_other(p[1]))
+                        for p in batch_pairs_idx
+                    ]
                     X_batch = np.array(batch_pairs_feats, dtype=np.float32)
                     probs = clf.predict_proba(X_batch)[:, 1]
                 else:
+                    batch_pairs_feats = []
                     probs = None
 
                 for eid, cand_ids, st, en in entity_cand_info:
@@ -449,15 +505,15 @@ def main():
                 if len(parsed_other_cache) > 200000:
                     parsed_other_cache.clear()
 
-                del batch_s1, batch_pairs_feats, entity_cand_info; gc.collect()
+                del batch_s1, raw_cands_per_entity, batch_pairs_idx, batch_pairs_feats, entity_cand_info; gc.collect()
 
-                if (b_start // BATCH_ENTITIES) % 4 == 0 or b_end == n_s1:
+                if (b_start // BATCH_ENTITIES) % 5 == 0 or b_end == n_s1:
                     total_so_far = total_processed + b_end
                     pct = (total_so_far / 1732544) * 100
                     log(f"[{ctry.upper()}] Progress: {total_so_far:,} / 1,732,544 ({pct:.1f}%) | Batch {b_end:,}/{n_s1:,} done")
 
-                # Gentle 1.0s thermal pause: cools CPU and leaves user apps 100% smooth
-                time.sleep(1.0)
+                # Responsive context-switching pause
+                time.sleep(0.02)
 
         total_processed += n_s1
         log(f"Completed {ctry.upper()}! Subtotal processed: {total_processed:,} / 1,732,544")
@@ -490,11 +546,26 @@ def main():
         zf.write(m_path, arcname="matching_results.tsv")
     log(f"CREATED: {z_path} ({z_path.stat().st_size / (1024*1024):.2f} MB - safely below GitHub 50MB limit)")
 
-    # 8. Official Submission Validation
+    # 8. Official Submission Validation & Streaming Subset Integrity Check
     log("\nSTEP 8: OFFICIAL SUBMISSION VALIDATION ACROSS ALL 1,732,544 TEST ENTITIES...")
-    val_cmd = f"python utils/validate_submission.py --matching {m_path} --candidate none_file --test-dir dataset/test"
+    val_cmd = f"python utils/validate_submission.py --matching {m_path} --test-dir dataset/test"
     ret = os.system(val_cmd)
     if ret == 0:
+        log("Checking 100% subset integrity between matching and candidate pairs (streaming)...")
+        m_count = subset_violations = 0
+        with open(m_path, "r", encoding="utf-8") as fm, open(c_path, "r", encoding="utf-8") as fc:
+            next(fm); next(fc)
+            for lm, lc in zip(fm, fc):
+                s1_m, _, ms = lm.rstrip("\r\n").partition("\t")
+                s1_c, _, cs = lc.rstrip("\r\n").partition("\t")
+                assert s1_m == s1_c, f"ID mismatch: {s1_m} vs {s1_c}"
+                m_set = set(ms.split(",")) if ms else set()
+                c_set = set(cs.split(",")) if cs else set()
+                if not m_set.issubset(c_set):
+                    subset_violations += 1
+                m_count += 1
+        assert subset_violations == 0, f"FATAL: Found {subset_violations} subset violations!"
+        log(f"VERIFIED: 100% subset integrity across all {m_count:,} test entities (0 violations).")
         log("SUCCESS: 100% test entities covered, exact header match, 0 self-matches, 0 format errors!")
         log(f"FILES READY FOR SUBMISSION: {m_path.resolve()} and {c_path.resolve()}")
     else:
