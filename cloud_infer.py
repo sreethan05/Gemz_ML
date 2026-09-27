@@ -23,6 +23,7 @@ sys.path.insert(0, str(ROOT / "scratch" / "v8"))
 from v4.core import PackedPool, CSRIndex, EntityRecord, ensure_hashseed  # noqa: E402
 from v4.core import keys_of, key_hashes  # noqa: E402
 from feats8 import batch_pair_features, N_FEATURES_V8  # noqa: E402
+from scratch.antigravity.phonetic import phonetic_collapse  # noqa: E402
 
 CSR_CHUNK = 10_000_000
 K0 = 600
@@ -111,12 +112,23 @@ def w_process(chunk_lines):
             cids = [pool.get_id(int(j)) for j in top]
             cands = [pool.record(int(j)) for j in top]
             probs = _G["clf"].predict_proba(batch_pair_features(r, cands))[:, 1]
+            resc = _G["rule"].get("rescue")
+            rescue_acc = []
+            if resc and "lo" in resc and "tau" in resc:
+                band = [i for i in range(len(cids)) if resc["lo"] <= probs[i] < th]
+                qc = phonetic_collapse(r.name_norm)
+                if band and qc:
+                    phs = rfp.cdist(
+                        [qc], [phonetic_collapse(c.name_norm) for c in cands],
+                        scorer=fuzz.token_set_ratio)[0] / 100
+                    rescue_acc = [i for i in band if phs[i] >= resc["tau"]]
             out_c.append(r.id + "\t" + ",".join(cids) + "\n")
             best_p = float(probs.max())
-            if best_p < mt:
+            if best_p < mt and not rescue_acc:
                 out_m.append(r.id + "\t\n")
             else:
                 acc = [i for i in range(len(cids)) if probs[i] >= th]
+                acc = sorted(set(acc + rescue_acc))
                 if not acc:
                     out_m.append(r.id + "\t\n")
                 else:
