@@ -163,9 +163,114 @@ def idf_pool(csrs, r, k0=K0):
     return js, ss
 
 
+def run_shard(country, k, n):
+    """Sequential worker: processes a contiguous slice of S1 (shard k of n)."""
+    ensure_hashseed()
+    with open(ROOT / "scratch" / "v8" / f"{country}_best_rule.json") as f:
+        rule = json.load(f)
+    _G["rule"] = rule
+    _G["rcfg"] = json.load(open(ROOT / "scratch" / "v8" / "variant_params.json"))[rule["tag"]]
+    _G["clf"] = load_model(rule)
+    pool, csrs = get_pool_csrs(country)
+    _G["pool"], _G["csrs"] = pool, csrs
+    sys.path.insert(0, str(ROOT / "scratch" / "v8"))
+    all_lines = []
+    with open(ROOT / "dataset" / "test" / "test_source1.tsv", encoding="utf-8") as f:
+        next(f)
+        for line in f:
+            p = line.rstrip("
+").split("	")
+            if len(p) >= 4 and p[3].strip().lower() == country:
+                all_lines.append(line)
+    total = len(all_lines)
+    per = (total + n - 1) // n
+    lo, hi = k * per, min((k + 1) * per, total)
+    lines = all_lines[lo:hi]
+    del all_lines
+    log(f"shard {k}/{n}: {len(lines):,} entities [{lo:,}:{hi:,})")
+    t0 = time.time()
+    m_path = ROOT / "output" / f"mr_v8_{country}_s{k}.tsv"
+    c_path = ROOT / "output" / f"cp_v8_{country}_s{k}.tsv"
+    cl_path = ROOT / "scratch" / "v8" / f"claims_v8_{country}_s{k}.tsv"
+    with open(m_path, "w", encoding="utf-8", newline="\n") as fm, \
+         open(c_path, "w", encoding="utf-8", newline="\n") as fc, \
+         open(cl_path, "w", encoding="utf-8", newline="\n") as fcl:
+        res = w_process(lines)
+        fm.write(res[0])
+        fc.write(res[1])
+        fcl.write(res[2])
+    log(f"shard {k}/{n} done in {(time.time()-t0)/60:.1f} min")
+
+
+def build_pool_country(country):
+    pool = PackedPool()
+    pool.cache_cap = 1
+    t0 = time.time()
+    for fn in ("test_source2.tsv", "test_source3.tsv"):
+        with open(ROOT / "dataset" / "test" / fn, encoding="utf-8") as f:
+            next(f)
+            for line in f:
+                p = line.rstrip("
+").split("	")
+                if len(p) >= 4 and p[3].strip().lower() == country:
+                    pool.add_raw(p[0], p[1], p[2])
+    pool.finalize()
+    pool._cache.clear()
+    pool.cache_cap = 200_000
+    log(f"{country} pool: {pool.n:,} records in {time.time()-t0:.0f}s")
+    return pool
+
+
+def build_csrs_country(pool):
+    csrs = []
+    for j0 in range(0, pool.n, CSR_CHUNK):
+        csrs.append(CSRIndex.build(pool, j0, min(j0 + CSR_CHUNK, pool.n), max_df=3000))
+        pool._cache.clear()
+    log(f"  index ready: {sum(len(c.J) for c in csrs):,} postings")
+    return csrs
+
+
+def load_model(rule):
+    """Load the calibrated model (m1 / m2 / probability-averaged ensemble)."""
+    if rule["model"] == "ens":
+        m1 = pickle.load(open(ROOT / "models" / "lgbm_model_v8_m1.pkl", "rb"))
+        m2 = pickle.load(open(ROOT / "models" / "lgbm_model_v8_m2.pkl", "rb"))
+        m1.set_params(n_jobs=1)
+        m2.set_params(n_jobs=1)
+        class Ens:
+            @staticmethod
+            def predict_proba(X):
+                p = (m1.predict_proba(X)[:, 1] + m2.predict_proba(X)[:, 1]) / 2
+                return np.column_stack((1 - p, p))
+        return Ens()
+    return pickle.load(open(ROOT / f"models/lgbm_model_v8_{rule['model']}.pkl", "rb"))
+
+
+def get_pool_csrs(country):
+    """Pool+CSR with on-disk cache (build once per machine, seed-consistent)."""
+    cdir = ROOT / "cloud_cache" / country
+    if (cdir / "pool.pkl").exists() and (cdir / "csrs.pkl").exists():
+        log(f"{country}: loading cached pool+index")
+        pool = pickle.load(open(cdir / "pool.pkl", "rb"))
+        csrs = pickle.load(open(cdir / "csrs.pkl", "rb"))
+        return pool, csrs
+    pool = build_pool_file(country)
+    csrs = build_csrs(pool)
+    cdir.mkdir(parents=True, exist_ok=True)
+    pickle.dump(pool, open(cdir / "pool.pkl", "wb"), protocol=4)
+    pickle.dump(csrs, open(cdir / "csrs.pkl", "wb"), protocol=4)
+    log(f"{country}: cached pool+index")
+    return pool, csrs
+
+
 def main():
     ensure_hashseed()
     country = sys.argv[1]
+    if "--shard" in sys.argv:
+        k = int(sys.argv[sys.argv.index("--shard") + 1])
+        n = int(sys.argv[sys.argv.index("--shard") + 2])
+        run_shard(country, k, n)
+        return
     n_workers = int(sys.argv[2]) if len(sys.argv) > 2 else 8
     with open(ROOT / "scratch" / "v8" / f"{country}_retrieval_ab.json") as f:
         best = json.load(f)["best"]

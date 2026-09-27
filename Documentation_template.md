@@ -1,216 +1,248 @@
-# Business Entity Resolution — Methodology
+# Business Entity Resolution — Methodology (v4 baseline and v8 status)
+
+## Current status and version history
+
+The v4 measurements below are the historical, full-pool holdout baseline;
+they are not the latest leaderboard result. The best leaderboard submission
+reported by the team is **0.929454** (v5). Local retrieval recall and the
+leaderboard F0.5 score are different metrics and must not be presented as
+interchangeable.
+
+### v4 baseline: measured retrieval error
+
+The v8 run's stated comparator is pair recall@40 of **0.9471 for US** and
+**0.9073 for India**. The separately saved v4 miss-taxonomy artifact reports
+US **0.9460** (82,027 / 86,713 true pairs retrieved) and India **0.9073**
+(78,478 / 86,493). The miss taxonomy found that **99.7% of US misses**
+(4,674 / 4,686) and **99.5% of India misses** (7,976 / 8,015) shared at
+least one blocking key but ranked outside the top 40. Only 0.3% / 0.5%
+respectively had no shared key. The principal v4 retrieval bottleneck was
+therefore ranking/candidate-cap loss, rather than absence of blocking keys.
+
+The error inspection also identified crowding when address evidence is
+empty or uninformative: name-similar records can occupy the short candidate
+list without address evidence to separate them. This is a qualitative error
+finding; no standalone numeric effect size is claimed here.
+
+### v8 retrieval: measured results
+
+The measured v8 pair recall@40 is **0.9740 for US** and **0.9389 for
+India**, reported against the comparator above. These are gains of **2.69**
+and **3.16 percentage points**, respectively. The selected retrieval
+variant is **n4**: name weight 0.35, address weight 0.55, IDF weight 0.10,
+neutral-address weight 0.55, with intermediate pool `k0=600`.
+
+The v8 index applies `max_df=3000` as a memory cap, reducing index postings
+from **209M to 111M**. This was measured as zero-semantic-change: it removes
+only over-common postings that are excluded by the query logic as well.
+The v8 model path uses 35 pair-feature dimensions, including `n_g4` and
+`a_g4`, followed by retraining and recalibration with the exact global
+1-to-1 decision simulation. Final v8 classifier F0.5 and leaderboard score
+are not asserted here until those results are available; pair recall alone
+does not determine final F0.5.
+
+The requested second-hop retrieval audit is also pending. The saved
+`scratch/v4/v5_eval_backup/` files preserve the held-out queries, truth,
+top-40 candidate IDs, and features, but do not include a reusable full-pool
+blocking index or normalized candidate-record text. Consequently no
+second-hop hit-rate@10/20/40 is reported until that retrieval is measured
+against the actual country pool; it must be split by a documented
+name-driven/address-driven miss definition.
+
+### France configuration decision
+
+As a provisional probability-distribution diagnostic, every 200th score
+was sampled from each saved v4 claims sidecar (US n=10,455; India
+n=11,846; France n=5,420). The empirical CDF distance was slightly smaller
+for France–US than France–India (KS 0.14989 vs 0.16128); France's median
+was 0.99936 (US 0.99952; India 0.99862), while the fraction above 0.7 was
+100% in all three samples. A separate profile analysis also favored the US
+distribution. The selected configuration is therefore **`france_uses: us`**.
+France has no labels in these sidecars, so this is a distribution-based
+configuration choice, not evidence that the US rule maximizes France F0.5.
 
 ## 1. Problem formulation
 
-Each Source 1 entity must be linked to zero or more records from Sources 2 and
-3. We treat this as a two-stage machine-learning pipeline:
+Each Source 1 entity must be linked to zero or more records from Sources 2
+and 3. We treat this as a two-stage ML pipeline:
 
-1. **Candidate generation (blocking)** — decide, cheaply, which (S1, S2/S3)
-   pairs are *plausible* matches. Recall of this stage is the hard upper bound
-   on final performance, so it is deliberately over-generative and its recall
-   is measured against the training ground truth on every run.
+1. **Candidate generation (blocking)** — decide cheaply which (S1, S2/S3)
+   pairs are plausible. Its pair recall is the hard ceiling on final recall.
 2. **Pair classification + per-entity decision rule** — score every candidate
    pair with a gradient-boosted model over string-similarity features, then
-   convert per-pair probabilities into per-entity match lists with a rule
-   tuned directly for the evaluation metric.
+   convert per-pair probabilities into per-entity match lists with rules
+   tuned directly for the challenge metric (macro F_0.5, singletons
+   included), per country.
 
-The evaluation metric is a macro-averaged F_0.5 over all Source 1 entities,
-with singletons included (a correctly predicted empty list scores 1.0; any
-false prediction on a true singleton scores 0.0). Because F_0.5 weights
-precision twice as much as recall, both the classifier threshold and the
-entity-level rule are tuned to be conservative, and the pipeline invests
-specifically in not predicting weak matches on likely-singleton entities.
+The metric is precision-weighted (F_0.5 weights precision 2x recall), so the
+decision rules are chosen by grid search on an honest holdout, and a final
+1-to-1 disambiguation removes guaranteed false merges.
 
 ## 2. Data handling
 
-All files are read as tab-separated values with an explicit tab separator and
-no quoting, as required. The three sources share no common identifier; the
-only signals are `business_name`, `business_address` and `country`.
+All files are read tab-separated with `sep="\t"`, no quoting. A full profile
+of all 26.4M rows (7 files) established the facts the design rests on:
 
-Country is treated strictly as an open-set string label: it is normalised
-(lower-cased) and used only through equality features. Nothing in the
-pipeline is hard-coded to the training countries (US, India), so the unseen
-test country (France) flows through unchanged. This was verified on
-challenge-shaped synthetic data where France appears only at test time.
+- Ground truth: 5.59% of S1 entities are singletons; matched entities have
+  3.46 matches on average (mode 3); every S2/S3 target links to at most one
+  S1 (verified: 0 multi-claims across 7.6M train targets) — this justifies
+  the 1-to-1 disambiguation stage.
+- Postal codes are nearly absent: <1% of India records contain a 6-digit
+  PIN, ~10% of US records a 5-digit ZIP. Blocking therefore cannot rely on
+  postal keys (an earlier design did and lost recall).
+- 23% of India true pairs have a target whose name is written in an Indic
+  script (Devanagari/Bengali/Gujarati etc.) while the S1 name is Latin.
+- Country labels are exactly {US, India, France}; test distributions for
+  US/India are statistically identical to train; France differs (shorter
+  names, French street abbreviations, accents).
 
-No external data of any kind is used: no business registries, no geocoding
-APIs, no pre-trained language models, no internet lookups. The only two
-"learned" components — the character n-gram TF-IDF spaces and the pair
-classifier — are fitted from scratch, on the provided files only.
+Country is treated as an open-set string label; nothing is hard-coded to the
+training countries.
+
+**No external data of any kind is used**: no registries, no geocoding, no
+pre-trained language models, no internet lookups. The only learned component
+is the pair classifier, fitted from scratch on the provided files.
 
 ## 3. Normalisation
 
-Each record's name and address go through an idempotent normalisation pass:
-
-- Unicode NFKD fold to ASCII for diacritics (crude transliteration of
-  accent marks), lower-casing, punctuation removal, whitespace collapsing,
-  `&` → `and`. Letters of any script survive normalisation — non-Latin
-  names (e.g. Devanagari) keep their characters rather than collapsing to
-  empty strings, so similarity features stay meaningful.
-- A ~45-entry address abbreviation map folds Rd/Rue → road-style canonical
-  forms (covering US, Indian and French-style abbreviations), so `No. 12, MG
-  Rd` and `12 Mahatma Gandhi Road` converge towards the same token sequence.
-- Legal suffixes and filler tokens (covering US/International: `Corp`, `Inc`, `LLC`, `Ltd`; Indian: `Pvt`, `Private`, `Sons`; French: `SARL`, `SAS`, `EURL`, `SCI`, `Societe`, etc.) are stripped from a "core token" view of the name that blocking uses; the full token view is retained for the similarity features.
-- Address numeric tokens (house/street numbers) and postal codes (supporting both 5-digit US ZIPs / French codes postaux and 6-digit Indian PIN codes) are extracted into separate fields, compared when present on both sides.
-- Canonical Normalization Module: To eliminate train/test normalization skew, a single unified module (`src/normalize.py`) serves as the sole source of truth across all training, validation, and inference passes.
-- A record whose name (or address) is missing does not feign agreement:
-  all name-similarity (or address-similarity) features are forced to zero
-  for such pairs, so two nameless records cannot look like a perfect match.
-
-Both the raw and normalised forms are kept: fuzzy similarity features work
-better on raw text, while blocking keys need canonical forms.
+- **Brahmic transliteration**: a hand-built code-point map renders the Indic
+  blocks (Devanagari, Bengali, Gurmukhi, Gujarati, Oriya, Tamil, Telugu,
+  Kannada, Malayalam — incl. native digits, virama, ZWJ/ZWNJ) into Latin.
+  Measured effect on native-script true pairs: mean name Jaro-Winkler
+  similarity 0.541 → 0.867; pairs above 0.85: 19% → 61%.
+- Unicode NFKD/NFKC folding (accent stripping, e.g. `Límited` → `limited`),
+  lower-casing, punctuation removal, `&` → `and`.
+- Address abbreviation canonicalisation (US/India/France: `Rd`, `Mgr`,
+  `R.` → rue, `Gde` → grande, ...) and French article/preposition stopwords
+  (`du de la le les des et ...`).
+- Legal-suffix stripping into a "core token" view, including the suffix
+  variants this dataset actually uses (`Private Limited` ↔ `Limited
+  Partners` ↔ `Limited Service` — hence `service` and `partners` are legal
+  tokens).
+- Address numbers and 5/6-digit postal codes extracted when present.
 
 ## 4. Candidate generation (blocking)
 
-Two complementary layers, **unioned** into a single candidate set:
+Per country (US / India / France processed separately; pools disjoint), over
+the FULL S2/S3 pool (test: 3.8M / 4.7M / 1.4M records):
 
-**Layer A — key blocking.** A pair becomes a candidate if **any** of five key
-families matches (keys are computed from the normalised record):
+**Index.** Each record emits keys from 7 families: exact normalised name,
+sorted core-token signature, individual core tokens, house number + name
+2-char prefix, postal codes, long address tokens. Keys are hashed to 64-bit
+integers and stored in a **CSR sorted posting-list index** — no bucket is
+ever deleted. (Earlier designs deleted buckets on overflow, which silently
+destroyed all keys for common tokens at multi-million scale — the single
+largest recall bug we found.) Keys with document frequency > 250k are dropped
+at build time (they cannot discriminate).
 
-| Key | Content | Country-scoped | Rationale |
-|---|---|---|---|
-| rare token | each core name token with document frequency ≤ 80 in the S2/S3 corpus | no | distinctive tokens (brand names, surnames) are near-unique evidence |
-| number | each address numeric token | no | house/street numbers rarely collide by accident |
-| postal / PIN | 5-digit (US ZIP / France CP) and 6-digit (India PIN) codes | yes | highly localized anchor across all 3 countries |
-| address token | distinctive address tokens (length ≥ 5, non-numeric) | yes | road, suburb, or locality alignment |
-| signature | first 4 tokens of the sorted core name | yes | immune to word-order transposition |
-| prefix | first 3 characters of the normalised name | yes | cheap typo-tolerant prefix match |
-| metaphone | phonetic code of the most distinctive core token | yes | handles transliterations (Krushna/Krishna) and typos |
+**Ranking — two-stage cascade.** For each S1 record:
 
-Buckets with more than 150 postings are dropped as too generic, which keeps
-candidate volume manageable on large corpora while preserving 99.26%+ true match recall.
+1. retrieve the IDF-weighted top pool: a candidate's score is the sum over
+   shared keys of `w_type / log(1 + df)` (rare keys dominate; keys with
+   df > 3000 are skipped at query time — their weight is ≤ 0.12 and they
+   dominate query cost);
+2. rescore the top pool by `0.35·name-token-set + 0.45·address-token-set +
+   0.2·IDF` and keep the top `cap` candidates.
 
-**Layer B — vector (fuzzy) blocking.** For every Source 1 record we also take
-the top-50 most similar Source 2/3 records by character 3–5-gram TF-IDF cosine
-over name+address. This layer catches pairs that no exact key survives —
-heavy typos, aggressive reordering, or transliterations that change every
-key token. It is implemented with chunked sparse matrix products, so it
-scales to large corpora without densifying the full similarity matrix. An
-optional per-entity cap (`--per-entity-topk`) keeps only the k best
-candidates per entity by the same cosine score.
+The cascade was chosen by A/B test on the honest holdout (25k held-out S1
+entities per country, full-size pool, positives NOT guaranteed index
+placement): name-only rescore *lost* 2.8pp vs raw IDF (chains share the
+name; the address separates the true branch); the name+address rescore
+*gained* +7.2pp pair recall at cap 12 (US: 0.849 → 0.921) and matched at
+cap 10 what raw IDF needed cap 40 for — a smaller candidate set with higher
+recall, which also improves the blocking-efficiency criterion.
 
-On the held-out validation slice of the training data the union of both
-layers achieves a measured pair recall of 0.999+ (i.e. >99.9% of all true
-match pairs survive into the candidate set), which is the recall ceiling for
-the matcher. The recall is recomputed and printed on every run, so any
-blocking regression is visible immediately.
+**Measured pair recall at production scale** (holdout, full pools):
+US 0.909 @cap10 / 0.924 @cap40; India 0.843 @cap10 / 0.866 @cap40.
+Miss analysis: only 2% of missed pairs share no key at all — the key set
+covers 99.8% of true pairs; the residual is ranking inside the cap.
 
-`output/candidate_pairs.tsv` records exactly the candidate set that the
-matching model scores — it is emitted from the final blocking stage after the
-bucket-size caps, so every final match is by construction a subset of it.
+`output/candidate_pairs.tsv` is emitted at this final stage — it is exactly
+the set the model scores, so every final match is a subset of it by
+construction.
 
 ## 5. Feature engineering
 
-For every candidate pair we compute 32 features:
+33 features per pair (all bounded similarities or small counts):
 
-**Name similarity (9):** Jaro–Winkler, normalised Levenshtein, token-sort
-ratio, token-set ratio, partial ratio, char 3–5-gram TF-IDF cosine, core-token
-Jaccard, core-token containment (min-size normalised overlap, catching
-DBA/trade-name patterns), and a length ratio.
-
-**Address similarity (8):** the same family on the address, plus a
-normalised address-token Jaccard over a stop-word-filtered token set.
-
-**Structural (5):** address number overlap (Jaccard over extracted numbers),
-number counts for both sides, PIN/ZIP equality (only when present on both
-sides), PIN presence flag, and country equality.
-
-**Interactions (6):** name-sort × address-sort product, min/mean of the
-token-set similarities, and products of the strongest name and address
-signals — these let the model learn that *either* a strong name match or a
-strong address match can carry a pair, but weak-weak combinations cannot.
-
-**Exact-match and source indicators (4):** whether the candidate comes from
-Source 2 vs Source 3 (sources may carry different noise levels), first-word
-match on the normalised name, exact equality of the fully normalised name,
-and equality of the legal-suffix-stripped core token set.
-
-The character n-gram TF-IDF spaces (one for names, one for addresses) are
-fitted unsupervised on the pooled text of the provided train and test files
-combined. This is transductive but uses only the challenge's own data; it
-also means the unseen country's text shapes the IDF weights, so its pairs
-are not scored against an out-of-vocabulary background.
-
-All features are either bounded similarities or small counts, so no scaling
-is needed, and none of them reference a country vocabulary.
+- Name (9): Jaro-Winkler, Levenshtein, token-sort / token-set / partial
+  ratios, core-token Jaccard, core-token containment, length ratio, and one
+  reserved slot kept equal to token-sort (a char-TF-IDF slot, ablated).
+- Address (8): the same family plus stopword-filtered address-token Jaccard.
+- Structural (5): number-overlap Jaccard, number counts, PIN match /
+  conflict / both-present flags.
+- Conflict and interaction (8): num-conflict flag, name-sort x address-sort
+  product, min/mean token-set, name-sort x number-overlap, address-set x
+  name-JW, source indicator (S2 vs S3), first-token match, exact
+  normalised-name equality, exact core-token-set equality.
 
 ## 6. Model
 
-A LightGBM gradient-boosted tree classifier (MIT licence; effectively
-unbounded "parameters" in the LLM sense but a classical tabular model far
-below any 8B limit; a scikit-learn HistGradientBoosting fallback is included
-automatically if lightgbm is unavailable). Hyperparameters: 700 trees,
-learning rate 0.05, 63 leaves, subsample 0.9, column sample 0.9, L2 lambda
-1.0, class weighting capped at 20:1.
+LightGBM (MIT licence, ~2.4 MB, classical tabular model — no LLM): 450
+trees, lr 0.06, 64 leaves, depth 8, min_child_samples 40, subsample 0.85,
+colsample 0.85, fixed seed.
 
-Training pairs are constructed exactly like inference pairs: the positives
-are the ground-truth matches (added even when blocking missed them, so the
-model still learns them), and the negatives are the blocked non-matches. This
-trains the classifier on precisely the distribution it will see at test
-time, with hard negatives (similar names, different businesses) arriving for
-free.
+Training pairs are constructed exactly like inference pairs, at production
+scale: 100k training S1 entities per country (deterministic md5 split, full
+file scanned), all their positives, plus 10 hard negatives each mined as the
+top non-matches of the same cascade blocking on the full 6.2M / 4.1M-record
+pools. Total 2.69M pairs (692k positive). Earlier models were trained
+against ~100-400k-record distractor pools — 25x smaller than production —
+which made their thresholds miscalibrated.
 
 ## 7. Decision rule and metric tuning
 
-A grid search over (threshold, min_top) maximises the exact challenge metric
-— macro F_0.5, computed per Source 1 entity and averaged over all entities
-including singletons — on a held-out 15% validation split of Source 1
-entities:
+Per country, a grid over (cap, threshold, min_top, rescue-mode) maximises
+exact macro F_0.5 (singletons included) on the 25k-entity holdout, evaluated
+through O(1) per-entity prefix sums so the full grid sweeps in seconds:
 
-- **threshold** — a candidate pair is accepted iff p ≥ threshold (calibrated to 0.55);
-- **min_top** — after filtering, if an entity's best surviving score is
-  below min_top, the entity is predicted as a singleton (calibrated to 0.70).
+- **US**: cap=10, threshold=0.55, min_top=0.55, rescue=off → **F0.5 0.9469**
+- **India**: cap=15, threshold=0.70, min_top=0.70, rescue=off → **F0.5 0.8969**
+- **France** (unseen): uses the conservative India rule (higher threshold
+  protects precision if unseen-country probability mass shifts downward).
+- The address-only "rescue" force-accept of the previous design was A/B
+  tested and **rejected** (rescue=off won everywhere): it over-merged US
+  true singletons (US predicted 4.0% singletons vs 5.6% true).
+- Expected combined macro-F0.5 (test-set country mix): **~0.916**.
 
-### Calibrating for Real-World Noise and Singleton Balance:
-1. **The Negative Depletion Pitfall:** When classifiers are validated on artificially sparse or randomly sampled negatives, candidate scores cluster unnaturally near 1.0 for matches and 0.0 for non-matches. Under that idealized distribution, an aggressive rule like `min_top = 0.95` appears attractive in validation. However, on the real multi-source test corpus, genuine business records exhibit real-world spelling variants, municipal numbering discrepancies, and transliterations that produce true-match model scores between 0.60 and 0.85. An over-strict `min_top = 0.95` erroneously zeroed out ~158,000 valid matches, artificially driving the predicted singleton rate up to 14.7% (against a true ground truth rate of only 5.58%).
-2. **The Calibrated Operating Point:** By evaluating directly against realistic blocking collisions from the full multi-source pool, the operating point was calibrated to `threshold = 0.55` and `min_top = 0.70`. This calibrated setting:
-   - Recovers valid matches without sacrificing the precision demanded by F_0.5.
-   - Restores the predicted singleton rate to ~6.5%, closely tracking the true 5.58% rate.
-   - Yields 0.9464+ macro F_0.5 on held-out ground truth data.
-
-The model, thresholds and TF-IDF spaces are fitted deterministically (fixed seeds).
+Finally, **1-to-1 target disambiguation**: when several S1 entities claim
+the same S2/S3 target, only the highest-probability claim survives
+(ground truth guarantees each target maps to ≤ 1 S1). This runs per country
+(pools are disjoint) and prunes only guaranteed false merges.
 
 ## 8. Validation performed
 
-Because the real test labels are hidden, all development used:
-
-0. **An EDA pass** (`src/eda.py`) over the provided files before modelling —
-   match/singleton distribution, empty-field rates, country splits, and manual
-   inspection of matched pairs to calibrate the noise assumptions.
-1. **A held-out validation split** of the training Source 1 entities (15%),
-   scored with an exact re-implementation of the challenge's macro-F_0.5
-   (including the singleton conventions), reported on every run together
-   with the blocking recall on the same slice.
-2. **A format validator** (`src/validate_outputs.py`, stdlib-only) that
-   re-checks every submission rule — exact headers, one row per test S1
-   entity, S2-/S3- IDs only, no duplicates, matches ⊆ candidates — and
-   refuses to finish the run if any rule is violated.
-3. **Synthetic end-to-end tests** (`tests/`): a generator that mimics the
-   documented noise patterns (typos, abbreviations, word-order
-   transposition, legal-suffix variation, missing address components,
-   landmark references, transliterations, confusable same-name
-   businesses in different cities) with US/India in the synthetic train
-   set and France only in the synthetic test set. The full pipeline
-   reaches macro F_0.5 ≈ 0.997 on that data, with blocking recall 0.999+,
-   confirming the France generalisation and the output format.
+- **Honest production-scale evaluator** (built after discovering that
+  small-pool evaluators with ~200-400k distractors inflated macro-F0.5 by
+  ~0.25 — the previous 0.9547 offline claim did not replicate on the
+  leaderboard). The evaluator mirrors inference exactly: full-size pools,
+  md5 holdout entities, positives not guaranteed placement, per-country
+  reporting.
+- **Official validator** (`utils/validate_submission.py`) plus LF-purity
+  (zero CR bytes) and streaming subset-integrity checks (matches ⊆
+  candidates) on the merged outputs.
+- Determinism: fixed seeds, `PYTHONHASHSEED=1` enforced for key hashing.
 
 ## 9. Reproducing the outputs
 
 ```bash
 pip install -r requirements.txt
-python3 run_pipeline.py --train-dir dataset/train \
-    --test-dir dataset/test --out-dir output
+export PYTHONHASHSEED=1
+
+python code/business_entity_resolution/v4/prep.py             # ~50 min
+python code/business_entity_resolution/v4/train_calibrate.py  # ~20 min
+python code/business_entity_resolution/v4/run_test.py all     # ~2 h
+python code/business_entity_resolution/v4/merge_validate.py   # merge + validate
 ```
 
-One command regenerates both output files from the provided data; the
-final line is `PASS` when the files satisfy every submission rule.
-`build_submission.py --team-name <name>` then assembles the final zip.
+(`run_test.py france,us` and `run_test.py india` can run as two parallel
+processes; `merge_validate.py` combines the per-country outputs, checks LF
+purity and subset integrity, then runs the official validator.)
 
 ## 10. Fair-play statement
 
 - No external databases, APIs, geocoding services or internet data were
-  used; every learned component is fitted from the provided files only.
+  used; the only learned component is fitted from the provided files.
 - The final model is LightGBM (MIT licence), a classical gradient-boosted
-  tree ensemble — no large pre-trained models are involved.
-- The pipeline never inspects entity IDs except as opaque identifiers
-  matched against the ground truth for training and evaluation.
+  tree ensemble — far below any model-size limit.
+- Entity IDs are used only as opaque identifiers.

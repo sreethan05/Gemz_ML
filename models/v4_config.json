@@ -1,0 +1,25 @@
+{
+  "countries": {
+    "us": {
+      "f05": 0.9469008472268691,
+      "cap": 10,
+      "threshold": 0.55,
+      "min_top": 0.55,
+      "rescue": "off",
+      "blocking_recall_at_cap": 0.9085604234659163,
+      "n_eval_entities": 25000
+    },
+    "india": {
+      "f05": 0.8969214880561603,
+      "cap": 15,
+      "threshold": 0.7,
+      "min_top": 0.7,
+      "rescue": "off",
+      "blocking_recall_at_cap": 0.8521498849617888,
+      "n_eval_entities": 25000
+    }
+  },
+  "france_uses": "us",
+  "combined_expected_f05": 0.9235348714033138,
+  "model": "models/lgbm_model_v4.pkl"
+}

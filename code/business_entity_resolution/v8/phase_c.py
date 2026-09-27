@@ -41,11 +41,11 @@ def train_models():
     log(f"train matrix: {X.shape[0]:,} pairs, {int(y.sum()):,} pos ({y.mean():.2%})")
     import lightgbm as lgb
     m1 = lgb.LGBMClassifier(
-        n_estimators=900, learning_rate=0.045, num_leaves=127, max_depth=11,
+        n_estimators=700, learning_rate=0.055, num_leaves=127, max_depth=11,
         min_child_samples=25, subsample=0.85, subsample_freq=1,
         colsample_bytree=0.8, reg_lambda=1.0, random_state=17, n_jobs=2)
     m2 = lgb.LGBMClassifier(
-        n_estimators=700, learning_rate=0.06, num_leaves=95, max_depth=9,
+        n_estimators=450, learning_rate=0.08, num_leaves=95, max_depth=9,
         min_child_samples=35, subsample=0.8, subsample_freq=1,
         colsample_bytree=0.7, extra_trees=True, random_state=123, n_jobs=2)
     t0 = time.time()
@@ -156,8 +156,8 @@ def main():
 
     models = {"m1": m1, "m2": m2, "ens": Ens()}
     report = {}
-    ths = np.round(np.arange(0.30, 0.92, 0.02), 3)
-    mts = np.round(np.arange(0.30, 0.92, 0.02), 3)
+    ths = np.round(np.arange(0.30, 0.92, 0.04), 3)
+    mts = np.round(np.arange(0.30, 0.92, 0.04), 3)
 
     for c in COUNTRIES:
         for tag in TAGS:
