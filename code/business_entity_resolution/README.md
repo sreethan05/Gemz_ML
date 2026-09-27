@@ -1,128 +1,81 @@
-# Business Entity Resolution — Amazon ML Challenge
+# Business Entity Resolution — v8 Reproduction Guide
 
-Determines which records from Source 2 and Source 3 refer to the same
-real-world business as each Source 1 entity, from noisy, multi-source
-TSV records (names, addresses, country). Produces both deliverables:
+This guide reproduces the v8 retrieval, calibration, inference, and finalization
+pipeline for the Amazon ML Challenge 2026 package. Run commands from the
+repository root. Keep the same source data, model artifacts, configuration
+files, and scripts together when reproducing a run.
 
-- `output/matching_results.tsv` — final entity matches (leaderboard file)
-- `output/candidate_pairs.tsv`  — the blocking candidate set the model scored
+## Environment
 
-## Quickstart
+- Python **3.11**
+- Install the project dependencies:
 
-From the directory that contains `dataset/` (the `student_resource/` folder
-of the challenge), with this folder at `code/business_entity_resolution/`:
+  ```bash
+  pip install -r code/business_entity_resolution/requirements.txt
+  ```
 
-```bash
-pip install -r code/business_entity_resolution/requirements.txt
+- Set `PYTHONHASHSEED=1` **before starting Python**. Key hashing is part of
+  candidate generation, so a consistent hash seed is required for reproducible
+  indexes and candidate ordering.
 
-python3 code/business_entity_resolution/run_pipeline.py \
-    --train-dir dataset/train \
-    --test-dir  dataset/test \
-    --out-dir   output
-```
+  Bash:
 
-The run takes a few minutes on a laptop, prints blocking recall, a held-out
-validation macro F_0.5 and the tuned decision rule, then writes and validates
-both output files. On success the last line is:
+  ```bash
+  export PYTHONHASHSEED=1
+  ```
 
-```
-PASS - both files satisfy every submission rule
-```
+  PowerShell:
 
-`output/matching_results.tsv` can then be uploaded to the Portal, and the
-whole `output/` folder plus this code goes into the final submission zip
-(`build_submission.py` does that — see below).
+  ```powershell
+  $env:PYTHONHASHSEED = "1"
+  ```
 
-## Requirements
+## Pipeline
 
-Python 3.10+ and the pinned packages in `requirements.txt`
-(pandas, numpy, scikit-learn, lightgbm, rapidfuzz, jellyfish).
-All models used are MIT/BSD-licensed libraries with no parameter size limits
-of concern (no LLMs are used; see the methodology document for the fair-play
-notes — no external data, APIs or geocoding anywhere).
-
-## Repository layout
-
-```
-business_entity_resolution/
-├── run_pipeline.py          # single entry point: data → blocking → features
-│                            #   → model → tuning → outputs → validation
-├── requirements.txt
-├── README.md                # this file
-├── src/
-│   ├── common.py            # config, IO (TSV readers/writers), Record container
-│   ├── eda.py               # exploratory data analysis report (run first!)
-│   ├── normalize.py         # name/address normalisation, abbreviations, pins
-│   ├── blocking.py          # key blocking + TF-IDF vector blocking (2 layers)
-│   ├── features.py          # 32 pair features (string sims + TF-IDF cosine)
-│   ├── model.py             # LightGBM pair classifier (sklearn fallback)
-│   ├── matching.py          # F_0.5-optimised per-entity decision rule
-│   ├── evaluate.py          # exact macro-F_0.5 scorer + (threshold, min_top) sweep
-│   └── validate_outputs.py  # local replica of the official submission validator
-└── tests/
-    ├── make_synthetic.py    # challenge-shaped synthetic data generator
-    ├── score_local.py       # scores outputs against a hidden synthetic truth
-    └── dataset*/            # generated locally; NOT part of the submission
-```
-
-## How it works (1-minute version)
-
-0. **EDA (optional, first)** — `python3 -m src.eda --train-dir dataset/train --test-dir dataset/test`
-   prints match/singleton distributions, empty-field rates, country splits and
-   real matched pairs to eyeball noise, before any modelling.
-1. **Blocking (two unioned layers)** — (a) key blocking: a pair becomes a
-   candidate if ANY of five cheap keys match (rare normalised name tokens,
-   address house numbers, sorted-token name signature + country, name prefix
-   + country, metaphone + country; oversized buckets dropped); (b) vector
-   blocking: for every S1 record the top-k (default 50) most similar S2/S3
-   records by char 3–5-gram TF-IDF cosine over name+address — the fuzzy layer
-   that catches heavy typos and transliterations no exact key survives. An
-   optional per-entity cap (`--per-entity-topk`) keeps the k best by cosine.
-   Blocking recall is measured on held-out ground truth at every run — it is
-   the recall ceiling, and the log line makes regressions visible.
-2. **Features** — 32 per-pair signals: Jaro-Winkler, Levenshtein, token-sort /
-   token-set / partial ratios on name and address, char 3–5-gram TF-IDF cosines
-   (fitted unsupervised on the provided train+test text only), token Jaccard,
-   containment, address-number overlap, PIN/ZIP equality, country equality,
-   source indicator (S2 vs S3), first-word match, exact-normalised-match flags
-   and interaction terms. Everything is string-based, so the unseen test
-   country (France) is handled with no code change.
-3. **Model** — LightGBM trained on blocked pairs: positives from the ground
-   truth (including any pair blocking missed), negatives are blocked
-   non-matches (hard negatives arrive for free).
-4. **Decision rule** — per-entity (threshold, min_top) pair tuned by grid
-   search to maximise the *exact* challenge metric: macro F_0.5 over all
-   Source 1 entities, singletons included. `min_top` protects true singletons:
-   if an entity's best candidate scores below it, the pipeline predicts
-   "no match" (worth a full 1.0 on that entity).
-5. **Validation** — the built-in validator re-checks every submission rule
-   (one row per test S1 entity, valid S2/S3 IDs, no duplicates, matches ⊆
-   candidates) before anything is written to the final location.
-
-## Reproducing / developing
-
-- Re-run end to end: `run_pipeline.py` is deterministic (fixed seed).
-- Inspect blocking quality: see the `blocking: ... recall(...)` log line.
-- Tune the decision rule differently: `--threshold` / `--min-top` overrides.
-- Synthetic smoke test (no real data needed):
+Run the stages in order. Retrieval builds the country-specific candidate pools
+and holdout artifacts; Phase C trains and calibrates the models/rules;
+inference generates the requested country's outputs; finalization validates
+and assembles the package.
 
 ```bash
-cd code/business_entity_resolution
-python3 tests/make_synthetic.py --out tests/dataset --seed 7
-python3 run_pipeline.py --train-dir tests/dataset/train \
-    --test-dir tests/dataset/test --out-dir output_test
-python3 tests/score_local.py --matching output_test/matching_results.tsv \
-    --truth tests/dataset/test_hidden_truth.tsv
+python scratch/v8/retrieval_v8.py us
+python scratch/v8/retrieval_v8.py india
+python scratch/v8/phase_c.py
+python scratch/v8/run_test_v8.py us
+python scratch/v8/run_test_v8.py india
+python scratch/v8/run_test_v8.py france
+python scratch/v8/finish_v8.py
 ```
 
-## Building the final submission zip
+The retrieval command accepts `us` or `india`. Run it once for each of those
+countries before Phase C. The inference script accepts the country being
+processed. Preserve the generated model and configuration files between
+stages; the finalizer expects the outputs from the preceding stages.
 
-After a successful run on the real test set:
+## Design notes
 
-```bash
-python3 code/business_entity_resolution/build_submission.py \
-    --team-name your_team_name
-```
+- **Memory-capped CSR index:** `max_df=3000` limits postings for overly common
+  keys. The index was reduced from **209 million to 111 million postings**.
+  This cap has zero semantic change: the query path already excludes keys
+  above the same document-frequency limit.
+- **Candidate ranking:** v8 uses the n4 rescore with name/address/IDF weights
+  **0.35 / 0.55 / 0.10**, respectively, plus a **0.55 neutral-address**
+  weight for records with missing or uninformative addresses. The intermediate
+  retrieval pool uses `k0=600`.
+- **Pair features:** the model uses **35 dimensions**: v4's 33 features plus
+  `n_g4` and `a_g4`.
+- **Target assignment:** exact global 1-to-1 assignment ensures each S2/S3
+  target is assigned to at most one S1 entity.
 
-creates `your_team_name_submission.zip` with the required structure
-(`output/`, `code/business_entity_resolution/`, `Documentation_template.md`).
+## Measured holdout retrieval
+
+Pair recall at 40 candidates improved over the v4 comparator:
+
+| Country | v4 pair recall@40 | v8 pair recall@40 | Change |
+|---|---:|---:|---:|
+| US | 0.9471 | 0.9740 | +0.0269 |
+| India | 0.9073 | 0.9389 | +0.0316 |
+
+These are holdout **candidate pair-recall** measurements. They are not the
+leaderboard F0.5 score; final score also depends on classification and the
+per-entity decision rules.
