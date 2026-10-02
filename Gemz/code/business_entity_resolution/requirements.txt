@@ -1,0 +1,8 @@
+# Tested versions recorded with the v8 model artifacts (Python 3.12)
+numpy==2.5.3
+pandas==3.0.5
+scikit-learn==1.9.1
+lightgbm==4.7.0
+rapidfuzz==3.14.6
+jellyfish==1.2.1
+tqdm==4.66.5
